@@ -1,25 +1,22 @@
-import { getSessionInfo } from "@/lib/auth";
-import { ensureDemoOfficer } from "@/db/seed";
+"use client";
+
 import LogoutButton from "@/components/logout-button";
 import OfficerGatekeeper from "@/components/officer-gatekeeper";
 import AdminHeaderUser from "@/components/admin-header-user";
 
-export const dynamic = "force-dynamic";
-
-export default async function AdminLayout({
+/**
+ * Client layout: session lives in localStorage (`officerAuth`).
+ * No cookies()/DB calls here — those were crashing /admin on Vercel
+ * when DATABASE_URL was unset.
+ */
+export default function AdminLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const session = await getSessionInfo();
-  const serverAuthenticated = Boolean(session.username && session.keyVerified);
-  const username = session.username ?? "Officer";
-  await ensureDemoOfficer();
-
   return (
-    <OfficerGatekeeper serverAuthenticated={serverAuthenticated}>
+    <OfficerGatekeeper serverAuthenticated={false}>
       <div className="min-h-full">
-        {/* Officer header strip */}
         <div className="sticky top-0 z-30 border-b-2 border-saffron bg-navy text-white shadow-sm">
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2.5 sm:px-6 lg:px-8">
             <div>
@@ -31,7 +28,7 @@ export default async function AdminLayout({
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <AdminHeaderUser fallbackUsername={username} />
+              <AdminHeaderUser fallbackUsername="Officer" />
               <LogoutButton />
             </div>
           </div>
