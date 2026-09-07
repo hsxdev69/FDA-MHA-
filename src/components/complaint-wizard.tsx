@@ -13,7 +13,6 @@ import { FraudRiskBadge, PriorityBadge } from "@/components/badges";
 import { compressImageFile } from "@/lib/image-compress";
 import { useDebouncedValue } from "@/lib/use-debounced";
 import Spinner from "@/components/ui/spinner";
-import EmailOtpVerify from "@/components/email-otp-verify";
 
 const CATEGORIES = [
   { id: "food-safety", label: "Food Safety", emoji: "🥗", type: "Unsafe Food" },
@@ -277,8 +276,6 @@ export default function ComplaintWizard() {
   const [name, setName] = useState("");
   const [mobile, setMobile] = useState("");
   const [email, setEmail] = useState("");
-  /** Supabase email-OTP gate: Step 5 submit stays disabled until true. */
-  const [emailVerified, setEmailVerified] = useState(false);
 
   const category = useMemo(
     () => CATEGORIES.find((c) => c.id === categoryId),
@@ -337,10 +334,6 @@ export default function ComplaintWizard() {
     }
     if (step === 4 && !/^\d{10}$/.test(mobile)) {
       setErrors(["Mobile number must be exactly 10 digits."]);
-      return;
-    }
-    if (step === 4 && !emailVerified) {
-      setErrors(["Please verify your email address with the 6-digit OTP in Step 4 before proceeding to review."]);
       return;
     }
     if (step === 4) {
@@ -459,12 +452,6 @@ export default function ComplaintWizard() {
       return;
     }
 
-    // EMAIL-OTP GUARD — a verified email (Supabase OTP) is mandatory.
-    if (!emailVerified) {
-      showFraudToast("Cannot submit: please verify your email address in Step 4.");
-      return;
-    }
-
     setSubmitting(true);
     try {
       const type =
@@ -524,7 +511,6 @@ export default function ComplaintWizard() {
     router,
     analyzing,
     showFraudToast,
-    emailVerified,
   ]);
 
   const steps = ["Category", "Product", "Location", "Evidence", "Review"];
@@ -815,14 +801,18 @@ export default function ComplaintWizard() {
               <input className="input font-mono" value={mobile} maxLength={10} onChange={(e) => setMobile(e.target.value)} />
             </div>
             <div className="sm:col-span-2">
-              <EmailOtpVerify
-                email={email}
-                onEmailChange={setEmail}
-                isEmailVerified={emailVerified}
-                setIsEmailVerified={setEmailVerified}
-                verified={emailVerified}
-                onVerifiedChange={setEmailVerified}
+              <label className="label">Email ID (optional)</label>
+              <input
+                type="email"
+                className="input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="yourname@gmail.com"
+                autoComplete="email"
               />
+              <p className="mt-1 text-xs text-muted">
+                Optional. We will use this to email you updates regarding your complaint.
+              </p>
             </div>
           </div>
         </section>
@@ -951,48 +941,15 @@ export default function ComplaintWizard() {
             </div>
           )}
 
-          {/* ── EMAIL VERIFICATION GATE ── */}
-          {!emailVerified && (
-            <div
-              role="alert"
-              className="rounded border-2 border-amber-500 bg-amber-50 p-4 space-y-2"
-            >
-              <p className="text-sm font-bold text-amber-900">
-                ⚠️ Email not verified yet.
-              </p>
-              <p className="text-sm text-amber-800">
-                Complete the 6-digit email OTP check in Step 4 to unlock
-                submission of your complaint.
-              </p>
-              <button
-                type="button"
-                className="btn-primary !py-2 text-sm"
-                onClick={() => {
-                  setErrors([]);
-                  setStep(4);
-                }}
-              >
-                ✉️ Verify Email (Go to Step 4)
-              </button>
-            </div>
-          )}
-          {emailVerified && (
-            <div className="rounded border-2 border-green-600 bg-green-50 px-4 py-2.5">
-              <p className="text-sm font-bold text-green-800">
-                🟢 Email Verified — <span className="font-mono">{email.trim()}</span>
-              </p>
-            </div>
-          )}
-
           <button
             type="button"
             className={`w-full py-3 active:scale-[0.99] ${
-              blockedByFraud || !emailVerified
+              blockedByFraud
                 ? "cursor-not-allowed rounded-lg bg-slate-200 text-slate-400 opacity-50"
                 : "btn-saffron disabled:opacity-70"
             }`}
-            disabled={submitting || analyzing || blockedByFraud || !emailVerified}
-            aria-disabled={blockedByFraud || !emailVerified}
+            disabled={submitting || analyzing || blockedByFraud}
+            aria-disabled={blockedByFraud}
             onClick={() => void submit()}
           >
             {submitting ? (
@@ -1001,8 +958,6 @@ export default function ComplaintWizard() {
               </span>
             ) : blockedByFraud ? (
               "Submit complaint (blocked — invalid evidence)"
-            ) : !emailVerified ? (
-              "Submit complaint (email verification required)"
             ) : (
               "Submit complaint"
             )}
@@ -1033,15 +988,13 @@ export default function ComplaintWizard() {
             type="button"
             className="btn-primary active:scale-[0.99] disabled:opacity-70"
             onClick={goNext}
-            disabled={analyzing || compressing || (step === 4 && !emailVerified)}
+            disabled={analyzing || compressing}
           >
             {step === 4 ? (
               analyzing ? (
                 <span className="inline-flex items-center gap-2">
                   <Spinner light /> Analyzing…
                 </span>
-              ) : !emailVerified ? (
-                "Review & analyse (Verify email first)"
               ) : (
                 "Review & analyse"
               )
