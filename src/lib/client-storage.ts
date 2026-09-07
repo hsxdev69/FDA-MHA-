@@ -1,11 +1,17 @@
 "use client";
 
-import { analyzePriority } from "@/lib/priority";
 import {
   DEMO_OFFICER_PASSWORD,
   DEMO_OFFICER_USERNAME,
   OFFICER_SECRET_KEY,
 } from "@/lib/constants";
+import {
+  heuristicVisionAnalysis,
+  severityFromVision,
+  type FraudRisk,
+  type VisionPriority,
+  type VisionResult,
+} from "@/lib/vision";
 
 export interface StoredReview {
   status: string;
@@ -31,9 +37,28 @@ export interface StoredComplaint {
   photoFilename: string | null;
   severity: number;
   aiReason: string;
+  authenticityScore: number;
+  priorityLevel: VisionPriority;
+  isLikelyFake: boolean;
+  fraudRisk: FraudRisk;
+  aiReasoning: string;
+  officerNote?: string;
+  recommendedAction?: string;
+  visionSource: VisionResult["source"];
   status: string;
   createdAt: string;
   reviews: StoredReview[];
+  category?: string;
+  brandName?: string;
+  batchNumber?: string;
+  mfgDate?: string;
+  expiryDate?: string;
+  establishmentName?: string;
+  taluka?: string;
+  district?: string;
+  evidenceFiles?: { name: string; mime: string; size: number; dataUrl: string }[];
+  assignedOfficer?: string;
+  linkedCaseId?: string | null;
 }
 
 export interface OfficerAccount {
@@ -57,6 +82,17 @@ const COMPLAINTS_KEY = "mahafda_complaints";
 const OFFICERS_KEY = "mahafda_officers";
 const OFFICER_AUTH_KEY = "officerAuth";
 
+export const DELETABLE_STATUSES = [
+  "Resolved",
+  "Disposed",
+  "Completed",
+  "Rejected",
+];
+
+export function isCaseDeletable(status: string): boolean {
+  return DELETABLE_STATUSES.includes(status);
+}
+
 function isBrowser(): boolean {
   return typeof window !== "undefined";
 }
@@ -65,25 +101,48 @@ function isBrowser(): boolean {
  * Generates a unique Complaint ID in format FDA-MH-XXXXXXXX
  */
 export function generateComplaintId(): string {
+  const year = new Date().getFullYear();
   const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   let code = "";
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 5; i++) {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
-  const ts = Date.now().toString(36).slice(-2).toUpperCase();
-  return `FDA-MH-${code}${ts}`;
+  return `FDA-MH-${year}-${code}`;
 }
 
 /**
  * Retrieves all complaints from localStorage.
  */
+function normalizeComplaint(raw: StoredComplaint): StoredComplaint {
+  if (typeof raw.authenticityScore === "number" && raw.aiReasoning) {
+    return raw;
+  }
+  const vision = heuristicVisionAnalysis(
+    raw.complaintType,
+    raw.description,
+    null,
+    Boolean(raw.photoData),
+  );
+  return {
+    ...raw,
+    authenticityScore: raw.authenticityScore ?? vision.authenticityScore,
+    priorityLevel: raw.priorityLevel ?? vision.priorityLevel,
+    isLikelyFake: raw.isLikelyFake ?? vision.isLikelyFake,
+    fraudRisk: raw.fraudRisk ?? vision.fraudRisk,
+    aiReasoning: raw.aiReasoning ?? raw.aiReason ?? vision.aiReasoning,
+    officerNote: raw.officerNote ?? vision.officerNote,
+    recommendedAction: raw.recommendedAction ?? vision.recommendedAction,
+    visionSource: raw.visionSource ?? vision.source,
+  };
+}
+
 export function getStoredComplaints(): StoredComplaint[] {
   if (!isBrowser()) return [];
   try {
     const raw = localStorage.getItem(COMPLAINTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map(normalizeComplaint) : [];
   } catch {
     return [];
   }
@@ -112,6 +171,20 @@ export function getStoredComplaintById(complaintId: string): StoredComplaint | n
 }
 
 /**
+ * Deletes a complaint from localStorage by its Complaint ID.
+ */
+export function deleteStoredComplaint(complaintId: string): boolean {
+  const clean = complaintId.trim().toUpperCase();
+  const list = getStoredComplaints();
+  const filtered = list.filter((c) => c.complaintId.toUpperCase() !== clean);
+  if (filtered.length !== list.length) {
+    saveStoredComplaints(filtered);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Creates and persists a new complaint in localStorage.
  */
 export function createStoredComplaint(input: {
@@ -125,17 +198,30 @@ export function createStoredComplaint(input: {
   email?: string;
   photoDataUrl?: string | null;
   photoFilename?: string | null;
+  vision?: VisionResult | null;
+  category?: string;
+  brandName?: string;
+  batchNumber?: string;
+  mfgDate?: string;
+  expiryDate?: string;
+  establishmentName?: string;
+  taluka?: string;
+  district?: string;
+  evidenceFiles?: { name: string; mime: string; size: number; dataUrl: string }[];
+  assignedOfficer?: string;
 }): StoredComplaint {
   const list = getStoredComplaints();
   const complaintId = generateComplaintId();
 
-  let analysis = { severity: 50, reason: "Preliminary review pending." };
-  try {
-    const res = analyzePriority(input.complaintType, input.description);
-    analysis = { severity: res.severity, reason: res.reason };
-  } catch {
-    // fallback
-  }
+  const vision =
+    input.vision ??
+    heuristicVisionAnalysis(
+      input.complaintType,
+      input.description,
+      null,
+      Boolean(input.photoDataUrl),
+    );
+  const severity = severityFromVision(vision);
 
   let photoData: string | null = null;
   let photoMime: string | null = null;
@@ -160,16 +246,102 @@ export function createStoredComplaint(input: {
     photoData,
     photoMime,
     photoFilename: input.photoFilename || null,
-    severity: analysis.severity,
-    aiReason: analysis.reason,
+    severity,
+    aiReason: vision.aiReasoning,
+    authenticityScore: vision.authenticityScore,
+    priorityLevel: vision.priorityLevel,
+    isLikelyFake: vision.isLikelyFake,
+    fraudRisk: vision.fraudRisk,
+    aiReasoning: vision.aiReasoning,
+    officerNote: vision.officerNote ?? undefined,
+    recommendedAction: vision.recommendedAction ?? undefined,
+    visionSource: vision.source,
     status: "Pending",
     createdAt: new Date().toISOString(),
     reviews: [],
+    category: input.category || input.complaintType,
+    brandName: input.brandName || "",
+    batchNumber: input.batchNumber || "",
+    mfgDate: input.mfgDate || "",
+    expiryDate: input.expiryDate || "",
+    establishmentName: input.establishmentName || "",
+    taluka: input.taluka || "",
+    district: input.district || "",
+    evidenceFiles: input.evidenceFiles || [],
+    assignedOfficer: input.assignedOfficer || "fdaofficer",
+    linkedCaseId: findDuplicateId(list, {
+      establishmentName: input.establishmentName || "",
+      brandName: input.brandName || "",
+      district: input.district || "",
+    }),
   };
 
   const updated = [newRecord, ...list];
   saveStoredComplaints(updated);
   return newRecord;
+}
+
+function norm(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function findDuplicateId(
+  list: StoredComplaint[],
+  needle: { establishmentName: string; brandName: string; district: string },
+): string | null {
+  const est = norm(needle.establishmentName);
+  const brand = norm(needle.brandName);
+  const dist = norm(needle.district);
+  if (!est && !brand) return null;
+  const match = list.find((c) => {
+    const sameEst = est && norm(c.establishmentName || "") === est;
+    const sameBrand = brand && norm(c.brandName || "") === brand;
+    const sameDist = !dist || !c.district || norm(c.district) === dist;
+    return sameEst && sameBrand && sameDist;
+  });
+  return match?.complaintId ?? null;
+}
+
+export function findSimilarComplaints(complaint: StoredComplaint): StoredComplaint[] {
+  const list = getStoredComplaints();
+  return list.filter((c) => {
+    if (c.complaintId === complaint.complaintId) return false;
+    const sameEst =
+      norm(c.establishmentName || "") &&
+      norm(c.establishmentName || "") === norm(complaint.establishmentName || "");
+    const sameBrand =
+      norm(c.brandName || "") &&
+      norm(c.brandName || "") === norm(complaint.brandName || "");
+    const sameDist =
+      !c.district ||
+      !complaint.district ||
+      norm(c.district) === norm(complaint.district || "");
+    return sameEst && sameBrand && sameDist;
+  });
+}
+
+export function reassignStoredComplaint(
+  complaintId: string,
+  officerUsername: string,
+): StoredComplaint | null {
+  const list = getStoredComplaints();
+  const idx = list.findIndex(
+    (c) => c.complaintId.toUpperCase() === complaintId.trim().toUpperCase(),
+  );
+  if (idx === -1) return null;
+  list[idx] = { ...list[idx], assignedOfficer: officerUsername };
+  saveStoredComplaints(list);
+  return list[idx];
+}
+
+export function linkStoredComplaints(fromId: string, toId: string): void {
+  const list = getStoredComplaints();
+  const idx = list.findIndex(
+    (c) => c.complaintId.toUpperCase() === fromId.trim().toUpperCase(),
+  );
+  if (idx === -1) return;
+  list[idx] = { ...list[idx], linkedCaseId: toId };
+  saveStoredComplaints(list);
 }
 
 /**
@@ -228,33 +400,6 @@ export function updateStoredComplaintStatus(
   };
   saveStoredComplaints(list);
   return list[idx];
-}
-
-/**
- * Checks whether a case status represents a completed / closed case.
- * Only completed cases can be deleted.
- */
-export function isCaseCompleted(status: string): boolean {
-  const s = (status || "").trim().toLowerCase();
-  return (
-    s === "resolved" ||
-    s === "disposed" ||
-    s === "completed" ||
-    s === "rejected"
-  );
-}
-
-/**
- * Permanently removes a complaint from localStorage by Complaint ID.
- */
-export function deleteStoredComplaint(complaintId: string): boolean {
-  if (!isBrowser()) return false;
-  const list = getStoredComplaints();
-  const clean = complaintId.trim().toUpperCase();
-  const updated = list.filter((c) => c.complaintId.toUpperCase() !== clean);
-  if (updated.length === list.length) return false;
-  saveStoredComplaints(updated);
-  return true;
 }
 
 // ============================================================

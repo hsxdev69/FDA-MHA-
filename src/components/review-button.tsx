@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import CaseReviewModal from "./case-review-modal";
+import type { FraudRisk, VisionPriority } from "@/lib/vision";
+import type { StoredComplaint } from "@/lib/client-storage";
 
 interface ReviewRecord {
   status: string;
@@ -16,10 +18,21 @@ export default function ReviewButton({
   complaintId,
   initialStatus,
   lastReview,
+  vision,
 }: {
   complaintId: string;
   initialStatus: string;
   lastReview: ReviewRecord | null;
+  vision?: {
+    authenticityScore?: number;
+    priorityLevel?: VisionPriority;
+    isLikelyFake?: boolean;
+    fraudRisk?: FraudRisk;
+    aiReasoning?: string;
+    officerNote?: string;
+    recommendedAction?: string;
+    linkedCaseId?: string | null;
+  };
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -39,6 +52,7 @@ export default function ReviewButton({
           initialStatus={initialStatus}
           initialNotes={lastReview?.notes ?? ""}
           lastReview={lastReview}
+          vision={vision}
           onClose={() => setOpen(false)}
           onSaved={() => {
             setOpen(false);

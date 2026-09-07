@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Spinner from "@/components/ui/spinner";
 import { OFFICER_SECRET_KEY } from "@/lib/constants";
 import {
   authenticateOfficer,
@@ -50,6 +51,7 @@ export default function OfficerLoginForm() {
 
   const handleSignIn = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (loading) return; // guard against double-submit
     clearAlerts();
     setLoading(true);
 
@@ -103,6 +105,7 @@ export default function OfficerLoginForm() {
 
   const handleSignUp = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (loading) return; // guard against double-submit
     clearAlerts();
     setLoading(true);
 
@@ -296,8 +299,18 @@ export default function OfficerLoginForm() {
               </p>
             </div>
 
-            <button type="submit" disabled={loading} className="btn-primary w-full py-3">
-              {loading ? "Signing in…" : "Sign In to Officer Dashboard"}
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full py-3 active:scale-[0.99] disabled:opacity-70"
+            >
+              {loading ? (
+                <span className="inline-flex items-center gap-2">
+                  <Spinner light /> Signing in…
+                </span>
+              ) : (
+                "Sign In to Officer Dashboard"
+              )}
             </button>
           </form>
         ) : (
@@ -405,8 +418,18 @@ export default function OfficerLoginForm() {
               </p>
             </div>
 
-            <button type="submit" disabled={loading} className="btn-primary w-full py-3">
-              {loading ? "Registering Officer…" : "Register Officer Account"}
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full py-3 active:scale-[0.99] disabled:opacity-70"
+            >
+              {loading ? (
+                <span className="inline-flex items-center gap-2">
+                  <Spinner light /> Registering Officer…
+                </span>
+              ) : (
+                "Register Officer Account"
+              )}
             </button>
           </form>
         )}

@@ -1,15 +1,21 @@
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isDatabaseConfigured } from "@/db";
 import { complaints, reviews } from "@/db/schema";
 import { isAuthorizedOfficer } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const dynamicParams = true;
+export const revalidate = 0;
 
 /**
  * DELETE /api/admin/complaints/[complaintId]
- * Deletes a complaint and its audit reviews permanently from the database.
+ * Deletes a complaint and all associated review audit logs from the database.
  * Only accessible to authorized officers.
+ *
+ * PostgreSQL is optional — if DATABASE_URL is unset, deletion is a no-op
+ * success (client already removed the case from localStorage).
  */
 export async function DELETE(
   request: Request,
@@ -23,20 +29,27 @@ export async function DELETE(
   }
 
   const { complaintId } = await params;
-  const clean = complaintId.trim().toUpperCase();
+  const cleanId = complaintId.trim().toUpperCase();
+
+  if (!isDatabaseConfigured) {
+    return NextResponse.json({
+      ok: true,
+      message: `Case ${cleanId} deleted successfully.`,
+    });
+  }
 
   try {
-    // 1. Delete associated review audit records first (foreign key reference)
-    await db.delete(reviews).where(eq(reviews.complaintId, clean));
+    await db.delete(reviews).where(eq(reviews.complaintId, cleanId));
+    await db.delete(complaints).where(eq(complaints.complaintId, cleanId));
 
-    // 2. Delete the complaint record
-    await db.delete(complaints).where(eq(complaints.complaintId, clean));
-
-    return NextResponse.json({ ok: true, complaintId: clean });
+    return NextResponse.json({
+      ok: true,
+      message: `Case ${cleanId} deleted successfully.`,
+    });
   } catch (error) {
-    console.error("[delete] Failed to delete complaint from database:", error);
+    console.error("[delete-complaint] Error deleting complaint:", error);
     return NextResponse.json(
-      { ok: false, error: "Database error while deleting complaint." },
+      { ok: false, error: "Failed to delete case from database." },
       { status: 500 },
     );
   }

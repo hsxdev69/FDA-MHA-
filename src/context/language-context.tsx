@@ -18,6 +18,7 @@ export interface Translations {
   logout: string;
   signedInAs: string;
 
+
   // Home Hero
   grievanceRedressal: string;
   heroTitle: string;
@@ -129,6 +130,7 @@ export const translations: Record<Language, Translations> = {
     officerLogin: "Officer Login",
     logout: "Logout",
     signedInAs: "Signed in as",
+
 
     grievanceRedressal: "Citizen Grievance Redressal",
     heroTitle: "Help Us Keep Maharashtra Safe",
@@ -245,6 +247,7 @@ export const translations: Record<Language, Translations> = {
     logout: "लॉगआउट",
     signedInAs: "लॉगिन उपयोगकर्ता",
 
+
     grievanceRedressal: "नागरिक शिकायत निवारण",
     heroTitle: "महाराष्ट्र को सुरक्षित रखने में हमारा सहयोग करें",
     heroSubtitle:
@@ -359,6 +362,7 @@ export const translations: Record<Language, Translations> = {
     officerLogin: "अधिकारी लॉगिन",
     logout: "लॉगआउट",
     signedInAs: "लॉगिन वापरकर्ता",
+
 
     grievanceRedressal: "नागरिक तक्रार निवारण कक्ष",
     heroTitle: "महाराष्ट्र सुरक्षित ठेवण्यासाठी आम्हाला सहकार्य करा",

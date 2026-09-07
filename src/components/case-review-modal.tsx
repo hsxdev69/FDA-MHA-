@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { addStoredReview, getOfficerSession } from "@/lib/client-storage";
+import { appendAuditLog } from "@/lib/audit";
+import type { FraudRisk, VisionPriority } from "@/lib/vision";
+import OfficerAIInsight from "@/components/officer-ai-insight";
+import type { StoredComplaint } from "@/lib/client-storage";
 
 type Toast = { type: "success" | "error"; message: string } | null;
 
@@ -31,6 +35,7 @@ export default function CaseReviewModal({
   initialStatus,
   initialNotes,
   lastReview,
+  vision,
   onClose,
   onSaved,
 }: {
@@ -38,6 +43,16 @@ export default function CaseReviewModal({
   initialStatus: string;
   initialNotes?: string;
   lastReview: ReviewRecord | null;
+  vision?: {
+    authenticityScore?: number;
+    priorityLevel?: VisionPriority;
+    isLikelyFake?: boolean;
+    fraudRisk?: FraudRisk;
+    aiReasoning?: string;
+    officerNote?: string;
+    recommendedAction?: string;
+    linkedCaseId?: string | null;
+  };
   onClose: () => void;
   onSaved: (status: string, notes: string) => void;
 }) {
@@ -99,6 +114,11 @@ export default function CaseReviewModal({
         notes: notes.trim(),
         officer: officerName,
         filename: attachment ? attachment.name : null,
+      });
+      appendAuditLog({
+        officerName,
+        action: `Status changed to ${status}`,
+        complaintId,
       });
 
       // 2. Also fire non-blocking sync to backend API
@@ -164,6 +184,28 @@ export default function CaseReviewModal({
           )}
 
           <form onSubmit={handleSubmit} className="space-y-5 p-6">
+            {/* ── Officer AI Insight — 3-section structured panel ── */}
+            {vision && (
+              <div className="rounded border border-border bg-page-warm p-3">
+                <p className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-navy">
+                  AI Vision Assessment
+                </p>
+                <OfficerAIInsight
+                  complaint={{
+                    complaintId,
+                    authenticityScore: vision.authenticityScore ?? 0,
+                    priorityLevel: vision.priorityLevel ?? "Medium",
+                    fraudRisk: vision.fraudRisk ?? "MEDIUM",
+                    isLikelyFake: vision.isLikelyFake ?? false,
+                    aiReasoning: vision.aiReasoning ?? "",
+                    officerNote: vision.officerNote,
+                    recommendedAction: vision.recommendedAction,
+                    linkedCaseId: vision.linkedCaseId ?? null,
+                  }}
+                />
+              </div>
+            )}
+
             <div>
               <label htmlFor="review-status" className="label">
                 Status <span className="text-red-600">*</span>

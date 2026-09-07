@@ -1,6 +1,6 @@
 "use client";
 
-import ComplaintForm from "@/components/complaint-form";
+import ComplaintWizard from "@/components/complaint-wizard";
 import { useLanguage } from "@/context/language-context";
 
 export default function ComplaintPage() {
@@ -16,10 +16,10 @@ export default function ComplaintPage() {
           {t.formTitle}
         </h1>
         <p className="mt-2 max-w-3xl text-sm text-ink-soft">
-          {t.formSubtitle}
+          {t.formSubtitle} Complete all five steps. You will receive an ID such as FDA-MH-2026-XXXXX.
         </p>
       </div>
-      <ComplaintForm />
+      <ComplaintWizard />
     </div>
   );
 }

@@ -17,11 +17,19 @@ export default function ReviewPanel({
   currentStatus,
   lastReview,
   reviewCount,
+  vision,
 }: {
   complaintId: string;
   currentStatus: string;
   lastReview: ReviewRecord | null;
   reviewCount: number;
+  vision?: {
+    authenticityScore?: number;
+    priorityLevel?: "Low" | "Medium" | "High" | "Critical";
+    isLikelyFake?: boolean;
+    fraudRisk?: "LOW" | "MEDIUM" | "HIGH";
+    aiReasoning?: string;
+  };
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -42,6 +50,7 @@ export default function ReviewPanel({
           initialStatus={currentStatus}
           initialNotes={lastReview?.notes ?? ""}
           lastReview={lastReview}
+          vision={vision}
           onClose={() => setOpen(false)}
           onSaved={() => {
             setOpen(false);

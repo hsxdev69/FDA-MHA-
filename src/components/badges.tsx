@@ -40,3 +40,32 @@ export function StatusBadge({ status }: { status: string }) {
     </span>
   );
 }
+
+const FRAUD_CLASSES: Record<string, string> = {
+  HIGH: "border-red-600 bg-red-50 text-red-700",
+  MEDIUM: "border-amber-500 bg-amber-50 text-amber-800",
+  LOW: "border-green-600 bg-green-50 text-green-800",
+};
+
+export function FraudRiskBadge({
+  risk,
+  isLikelyFake,
+}: {
+  risk?: string;
+  isLikelyFake?: boolean;
+}) {
+  const level = isLikelyFake ? "HIGH" : risk === "HIGH" || risk === "MEDIUM" || risk === "LOW" ? risk : "MEDIUM";
+  const label =
+    isLikelyFake || level === "HIGH"
+      ? "FRAUD RISK: HIGH"
+      : level === "LOW"
+        ? "VERIFIED"
+        : "UNCERTAIN";
+  return (
+    <span
+      className={`inline-flex items-center rounded border px-2.5 py-0.5 text-[10px] font-bold tracking-wide ${FRAUD_CLASSES[level]}`}
+    >
+      {label}
+    </span>
+  );
+}

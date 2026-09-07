@@ -1,17 +1,49 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { formatDate } from "@/lib/format";
-import { PriorityBadge, StatusBadge } from "@/components/badges";
-import EvidenceThumbnail from "@/components/evidence-thumbnail";
-import ReviewButton from "@/components/review-button";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   deleteStoredComplaint,
+  getOfficerSession,
   getStoredComplaints,
-  isCaseCompleted,
+  isCaseDeletable,
+  linkStoredComplaints,
+  reassignStoredComplaint,
   type StoredComplaint,
 } from "@/lib/client-storage";
+import { appendAuditLog } from "@/lib/audit";
+import { slaStatus } from "@/lib/sla";
+import { useDebouncedValue } from "@/lib/use-debounced";
+import { CaseRow, KpiCard } from "@/components/dashboard-parts";
+import Spinner from "@/components/ui/spinner";
+
+/* Heavy modules are lazy-loaded so the dashboard paints immediately. */
+const ComplaintMap = dynamic(() => import("@/components/complaint-map"), {
+  ssr: false,
+  loading: () => <PanelSkeleton label="Loading map…" />,
+});
+const AdminAnalytics = dynamic(() => import("@/components/admin-analytics"), {
+  ssr: false,
+  loading: () => <PanelSkeleton label="Loading analytics…" />,
+});
+const OfficerWorkload = dynamic(() => import("@/components/officer-workload"), {
+  ssr: false,
+  loading: () => <PanelSkeleton label="Loading workload…" />,
+});
+const AuditLogsPanel = dynamic(() => import("@/components/audit-logs-panel"), {
+  ssr: false,
+  loading: () => <PanelSkeleton label="Loading audit log…" />,
+});
+
+function PanelSkeleton({ label }: { label: string }) {
+  return (
+    <div className="card flex items-center gap-3 p-10 text-sm text-muted">
+      <Spinner /> {label}
+    </div>
+  );
+}
+
+type Tab = "cases" | "map" | "analytics" | "workload" | "audit";
 
 export default function OfficerDashboardClient({
   serverComplaints = [],
@@ -19,30 +51,26 @@ export default function OfficerDashboardClient({
   serverComplaints?: StoredComplaint[];
 }) {
   const [rows, setRows] = useState<StoredComplaint[]>(serverComplaints);
-  const [loaded, setLoaded] = useState(true);
-  const [caseToDelete, setCaseToDelete] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [caseToDelete, setCaseToDelete] = useState<StoredComplaint | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [deleteToast, setDeleteToast] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("cases");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 300);
 
-  const loadComplaints = () => {
+  const loadComplaints = useCallback(() => {
     const localList = getStoredComplaints();
-    // Merge local and server complaints by complaintId without duplicates
     const map = new Map<string, StoredComplaint>();
-    for (const c of serverComplaints) {
-      map.set(c.complaintId.toUpperCase(), c);
-    }
-    for (const c of localList) {
-      map.set(c.complaintId.toUpperCase(), c);
-    }
-
+    for (const c of serverComplaints) map.set(c.complaintId.toUpperCase(), c);
+    for (const c of localList) map.set(c.complaintId.toUpperCase(), c);
     const merged = Array.from(map.values()).sort((a, b) => {
       if (b.severity !== a.severity) return b.severity - a.severity;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
-
     setRows(merged);
     setLoaded(true);
-  };
+  }, [serverComplaints]);
 
   useEffect(() => {
     loadComplaints();
@@ -53,74 +81,132 @@ export default function OfficerDashboardClient({
       window.removeEventListener("mahafda_complaints_updated", handleUpdate);
       window.removeEventListener("storage", handleUpdate);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadComplaints]);
+
+  /* Filtering is debounced + memoised so typing never blocks the table. */
+  const visibleRows = useMemo(() => {
+    const q = debouncedSearch.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.complaintId.toLowerCase().includes(q) ||
+        (r.category || r.complaintType).toLowerCase().includes(q) ||
+        (r.district || "").toLowerCase().includes(q) ||
+        (r.establishmentName || "").toLowerCase().includes(q) ||
+        r.status.toLowerCase().includes(q),
+    );
+  }, [rows, debouncedSearch]);
+
+  /* SLA + counters computed once per rows change, not per render. */
+  const stats = useMemo(() => {
+    let high = 0;
+    let medium = 0;
+    let low = 0;
+    let pending = 0;
+    let resolved = 0;
+    let breached = 0;
+    for (const r of rows) {
+      if (r.severity >= 70) high += 1;
+      else if (r.severity >= 40) medium += 1;
+      else low += 1;
+      if (r.status === "Pending") pending += 1;
+      if (["Resolved", "Disposed", "Completed"].includes(r.status)) resolved += 1;
+      if (slaStatus(r).breached) breached += 1;
+    }
+    return [
+      { label: "Total Cases", value: rows.length, accent: "bg-navy text-white" },
+      { label: "High Priority", value: high, accent: "bg-red-600 text-white" },
+      { label: "Medium Priority", value: medium, accent: "bg-amber-500 text-white" },
+      { label: "Low Priority", value: low, accent: "bg-green-600 text-white" },
+      { label: "Pending Review", value: pending, accent: "bg-slate-500 text-white" },
+      { label: "Disposed", value: resolved, accent: "bg-emerald-600 text-white" },
+      { label: "SLA Breached", value: breached, accent: "bg-red-800 text-white" },
+    ];
+  }, [rows]);
+
+  const officerName = useCallback(() => {
+    const s = getOfficerSession();
+    return s?.user.fullName || s?.user.username || "Officer";
   }, []);
 
-  const handleConfirmDelete = async (complaintId: string) => {
-    setDeleting(true);
-    const cleanId = complaintId.trim().toUpperCase();
-
-    try {
-      // 1. Remove from localStorage
-      deleteStoredComplaint(cleanId);
-
-      // 2. Also send background DELETE request to server database
-      try {
-        fetch(`/api/admin/complaints/${encodeURIComponent(cleanId)}`, {
-          method: "DELETE",
-          headers: { "x-officer-secret": "Harshal@123" },
-        }).catch(() => {});
-      } catch {
-        // ignore network error
-      }
-
-      // 3. Update dashboard state immediately without full page reload
+  const handleReassign = useCallback(
+    (complaintId: string, officer: string) => {
+      reassignStoredComplaint(complaintId, officer);
+      appendAuditLog({
+        officerName: officerName(),
+        action: `Case reassigned to ${officer}`,
+        complaintId,
+      });
       setRows((prev) =>
-        prev.filter((c) => c.complaintId.toUpperCase() !== cleanId),
+        prev.map((r) =>
+          r.complaintId === complaintId ? { ...r, assignedOfficer: officer } : r,
+        ),
       );
+    },
+    [officerName],
+  );
 
-      // 4. Show green success toast
-      setDeleteToast(`Case [${cleanId}] deleted successfully.`);
-      setTimeout(() => setDeleteToast(null), 5000);
+  const handleLink = useCallback((complaintId: string, linkedId: string) => {
+    linkStoredComplaints(complaintId, linkedId);
+    setToastMessage(`Linked ${complaintId} → ${linkedId}`);
+  }, []);
 
-      // 5. Close confirmation modal
+  const handleAskDelete = useCallback((row: StoredComplaint) => {
+    setCaseToDelete(row);
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!caseToDelete || deleting) return;
+    const targetId = caseToDelete.complaintId;
+    setDeleting(true);
+    try {
+      deleteStoredComplaint(targetId);
+      appendAuditLog({
+        officerName: officerName(),
+        action: "Case deleted",
+        complaintId: targetId,
+      });
+      setRows((prev) =>
+        prev.filter((r) => r.complaintId.toUpperCase() !== targetId.toUpperCase()),
+      );
       setCaseToDelete(null);
-    } catch (err) {
-      console.error("Failed to delete case:", err);
+      setToastMessage(`Case ${targetId} deleted successfully.`);
+      window.setTimeout(
+        () => setToastMessage((cur) => (cur?.includes(targetId) ? null : cur)),
+        4000,
+      );
+      void fetch(`/api/admin/complaints/${encodeURIComponent(targetId)}`, {
+        method: "DELETE",
+        headers: { "x-officer-secret": "Harshal@123" },
+      }).catch(() => {});
     } finally {
       setDeleting(false);
     }
-  };
+  }, [caseToDelete, deleting, officerName]);
 
-  const total = rows.length;
-  const high = rows.filter((r) => r.severity >= 70).length;
-  const medium = rows.filter((r) => r.severity >= 40 && r.severity < 70).length;
-  const low = rows.filter((r) => r.severity < 40).length;
-  const pending = rows.filter((r) => r.status === "Pending").length;
-  const resolved = rows.filter((r) => isCaseCompleted(r.status)).length;
-
-  const stats = [
-    { label: "Total Cases", value: total, accent: "bg-navy text-white" },
-    { label: "High Priority", value: high, accent: "bg-red-600 text-white" },
-    { label: "Medium Priority", value: medium, accent: "bg-amber-500 text-white" },
-    { label: "Low Priority", value: low, accent: "bg-green-600 text-white" },
-    { label: "Pending Review", value: pending, accent: "bg-slate-500 text-white" },
-    { label: "Disposed", value: resolved, accent: "bg-emerald-600 text-white" },
+  const tabs: [Tab, string][] = [
+    ["cases", "Cases"],
+    ["map", "Map"],
+    ["analytics", "Analytics"],
+    ["workload", "Workload"],
+    ["audit", "Audit log"],
   ];
 
   if (!loaded) {
-    return (
-      <div className="space-y-6">
-        <div className="card p-10 text-center text-sm text-muted">
-          Loading Officer Dashboard cases…
-        </div>
-      </div>
-    );
+    return <PanelSkeleton label="Loading Officer Dashboard cases…" />;
   }
 
   return (
     <div className="space-y-8">
-      {/* Page header */}
+      {toastMessage && (
+        <div className="flex items-center justify-between rounded border border-green-600 bg-green-50 px-4 py-3 text-sm font-semibold text-green-800">
+          <span>✓ {toastMessage}</span>
+          <button type="button" onClick={() => setToastMessage(null)}>
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-end justify-between gap-3 border-l-4 border-saffron pl-4">
         <div>
           <p className="font-heading text-[11px] font-semibold uppercase tracking-[0.3em] text-muted">
@@ -129,259 +215,138 @@ export default function OfficerDashboardClient({
           <h1 className="mt-1 font-heading text-3xl font-bold tracking-tight text-navy">
             Complaint Management
           </h1>
-          <p className="mt-1 text-sm text-ink-soft">
-            Sorted by AI priority (highest first), then by newest complaint.
-          </p>
         </div>
         <p className="font-mono text-xs text-muted">
-          Total Records: <span className="font-semibold text-navy">{total}</span>
+          Total Records: <span className="font-semibold text-navy">{rows.length}</span>
         </p>
       </div>
 
-      {/* Success Notification Toast */}
-      {deleteToast && (
-        <div
-          role="status"
-          className="flex items-center justify-between rounded border border-green-600 bg-green-50 px-4 py-3 text-sm font-semibold text-green-800 shadow-sm transition-all"
-        >
-          <div className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-green-600 text-xs text-white">
-              ✓
-            </span>
-            <span>{deleteToast}</span>
-          </div>
+      <div className="flex flex-wrap gap-2 border-b border-border pb-2">
+        {tabs.map(([id, lab]) => (
           <button
+            key={id}
             type="button"
-            onClick={() => setDeleteToast(null)}
-            className="rounded px-2 py-0.5 text-xs font-bold text-green-700 hover:bg-green-100 hover:text-green-900"
-            aria-label="Dismiss message"
+            onClick={() => setTab(id)}
+            className={
+              tab === id
+                ? "btn-primary !py-1.5 !px-3 text-xs active:scale-[0.98]"
+                : "btn-outline !py-1.5 !px-3 text-xs active:scale-[0.98]"
+            }
           >
-            ✕
+            {lab}
           </button>
-        </div>
-      )}
-
-      {/* KPI Stats */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {stats.map((stat) => (
-          <div key={stat.label} className="card overflow-hidden">
-            <div className={`px-4 py-3 ${stat.accent}`}>
-              <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] opacity-90">
-                {stat.label}
-              </p>
-              <p className="mt-1 font-heading text-3xl font-bold leading-none">
-                {stat.value}
-              </p>
-            </div>
-          </div>
         ))}
       </div>
 
-      {/* Table */}
-      <div className="card overflow-hidden">
-        <div className="flex items-center justify-between border-b border-border bg-page-warm px-5 py-3">
-          <p className="font-heading text-sm font-bold text-navy">All Cases</p>
-          <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-            {total} record{total === 1 ? "" : "s"}
-          </span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="gov-table min-w-[1150px]">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Type</th>
-                <th>Evidence</th>
-                <th>Location</th>
-                <th>Priority</th>
-                <th>AI Reason</th>
-                <th>Status</th>
-                <th>Date</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="py-16 text-center">
-                    <span className="block text-4xl" aria-hidden="true">
-                      🗂️
-                    </span>
-                    <p className="mt-3 font-heading text-base font-semibold text-navy">
-                      No complaints submitted yet.
-                    </p>
-                    <p className="mt-1 text-sm text-muted">
-                      Cases lodged through the citizen &ldquo;File Complaint&rdquo;
-                      form will appear here automatically.
-                    </p>
-                  </td>
-                </tr>
-              )}
-              {rows.map((row) => {
-                const lastReview =
-                  row.reviews && row.reviews.length > 0 ? row.reviews[0] : null;
-                let thumbUri: string | null = null;
-                if (row.photoData) {
-                  thumbUri = row.photoData.startsWith("data:")
-                    ? row.photoData
-                    : `data:${row.photoMime || "image/jpeg"};base64,${row.photoData}`;
-                }
+      {tab === "map" && <ComplaintMap rows={rows} />}
+      {tab === "analytics" && <AdminAnalytics rows={rows} />}
+      {tab === "workload" && <OfficerWorkload rows={rows} />}
+      {tab === "audit" && <AuditLogsPanel />}
 
-                const completed = isCaseCompleted(row.status);
+      {tab === "cases" && (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+            {stats.map((s) => (
+              <KpiCard key={s.label} label={s.label} value={s.value} accent={s.accent} />
+            ))}
+          </div>
 
-                return (
-                  <tr key={row.complaintId}>
-                    <td>
-                      <Link
-                        href={`/admin/complaint/${row.complaintId}`}
-                        className="font-mono text-xs font-bold text-navy hover:underline"
-                      >
-                        {row.complaintId}
-                      </Link>
-                    </td>
-                    <td className="font-semibold text-ink">{row.complaintType}</td>
-                    <td>
-                      <EvidenceThumbnail
-                        src={thumbUri}
-                        complaintId={row.complaintId}
-                        size={44}
-                      />
-                    </td>
-                    <td className="max-w-[170px] truncate" title={row.location}>
-                      {row.location}
-                    </td>
-                    <td>
-                      <PriorityBadge severity={row.severity} />
-                    </td>
-                    <td className="max-w-[200px] truncate text-xs text-muted" title={row.aiReason}>
-                      {row.aiReason}
-                    </td>
-                    <td>
-                      <StatusBadge status={row.status} />
-                    </td>
-                    <td className="whitespace-nowrap font-mono text-[11px] text-muted">
-                      {formatDate(row.createdAt)}
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-1.5 whitespace-nowrap">
-                        <ReviewButton
-                          complaintId={row.complaintId}
-                          initialStatus={row.status}
-                          lastReview={lastReview}
-                        />
-
-                        {/* Conditional Delete Action Button */}
-                        {completed ? (
-                          <button
-                            type="button"
-                            onClick={() => setCaseToDelete(row.complaintId)}
-                            className="inline-flex items-center gap-1 rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:border-red-400 hover:bg-red-100"
-                            title={`Delete completed case ${row.complaintId}`}
-                            aria-label={`Delete case ${row.complaintId}`}
-                          >
-                            <span aria-hidden="true">🗑️</span> Delete
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled
-                            className="inline-flex cursor-not-allowed items-center gap-1 rounded border border-slate-200 bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-400 opacity-60"
-                            title="Case must be completed before deletion."
-                            aria-label="Case must be completed before deletion"
-                          >
-                            <span aria-hidden="true">🗑️</span> Delete
-                          </button>
-                        )}
-                      </div>
-                    </td>
+          <div className="card overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-page-warm px-5 py-3">
+              <p className="font-heading text-sm font-bold text-navy">All Cases</p>
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search ID, district, shop, status…"
+                className="input max-w-xs !py-1.5 text-xs"
+              />
+              <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
+                {visibleRows.length} of {rows.length}
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="gov-table min-w-[1200px]">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Type</th>
+                    <th>Evidence</th>
+                    <th>Location</th>
+                    <th>Priority</th>
+                    <th>Fraud Risk</th>
+                    <th>AI Vision Finding</th>
+                    <th>Status / SLA</th>
+                    <th>Date</th>
+                    <th>Actions</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                </thead>
+                <tbody>
+                  {visibleRows.length === 0 && (
+                    <tr>
+                      <td colSpan={10} className="py-16 text-center text-muted">
+                        {rows.length === 0
+                          ? "No complaints submitted yet."
+                          : "No cases match your search."}
+                      </td>
+                    </tr>
+                  )}
+                  {visibleRows.map((row) => (
+                    <CaseRow
+                      key={row.complaintId}
+                      row={row}
+                      canDelete={isCaseDeletable(row.status)}
+                      onDelete={handleAskDelete}
+                      onReassign={handleReassign}
+                      onLink={handleLink}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
 
-      {/* Confirmation Safety Modal */}
       {caseToDelete && (
         <>
-          {/* Backdrop */}
           <div
-            className="fixed inset-0 z-50 bg-ink/70"
+            className="fixed inset-0 z-40 bg-ink/60"
             onClick={() => !deleting && setCaseToDelete(null)}
-            aria-hidden="true"
           />
-
-          {/* Modal Box */}
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Confirm Case Deletion"
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          >
-            <div className="card w-full max-w-md overflow-hidden shadow-2xl">
-              {/* Header */}
-              <div className="flex items-center justify-between border-b-2 border-red-600 bg-navy px-5 py-3.5 text-white">
-                <div className="flex items-center gap-2.5">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-red-600 text-sm font-bold text-white">
-                    ⚠️
-                  </span>
-                  <h2 className="font-heading text-base font-bold text-white">
-                    Confirm Permanent Deletion
-                  </h2>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => !deleting && setCaseToDelete(null)}
-                  disabled={deleting}
-                  className="rounded border border-white/20 bg-white/10 px-2 py-0.5 text-xs font-semibold text-white transition hover:bg-white/20"
-                  aria-label="Close dialog"
-                >
-                  ✕
-                </button>
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="card w-full max-w-md overflow-hidden border-2 border-red-500">
+              <div className="bg-red-600 px-6 py-4 text-white">
+                <h2 className="font-heading font-bold">Confirm Permanent Deletion</h2>
+                <p className="font-mono text-xs">{caseToDelete.complaintId}</p>
               </div>
-
-              {/* Modal Body */}
-              <div className="space-y-4 p-6">
-                <p className="text-sm leading-relaxed text-ink-soft">
+              <div className="space-y-3 p-6 text-sm">
+                <p>
                   Are you sure you want to permanently delete Case ID{" "}
-                  <strong className="font-mono font-bold text-navy">
-                    [{caseToDelete}]
-                  </strong>
-                  ? This action cannot be undone.
+                  <strong>{caseToDelete.complaintId}</strong>? This action cannot be undone.
                 </p>
-
-                <div className="notice notice-danger text-xs leading-relaxed">
-                  <p>
-                    <strong className="text-red-700">Permanent Action:</strong>{" "}
-                    The complaint record, citizen evidence photo, and all officer
-                    audit logs will be permanently removed from storage.
-                  </p>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center justify-end gap-3 pt-2">
+                <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCaseToDelete(null)}
+                    className="flex-1 rounded bg-red-600 py-2 font-semibold text-white disabled:opacity-60 active:scale-[0.99]"
                     disabled={deleting}
-                    className="btn-outline !py-2 !px-4 text-xs"
+                    onClick={handleConfirmDelete}
                   >
-                    Cancel
+                    {deleting ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Spinner light /> Deleting…
+                      </span>
+                    ) : (
+                      "Yes, Delete Case"
+                    )}
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleConfirmDelete(caseToDelete)}
+                    className="btn-outline flex-1"
                     disabled={deleting}
-                    className="inline-flex items-center gap-1.5 rounded border border-red-700 bg-red-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-red-700 disabled:opacity-60"
+                    onClick={() => setCaseToDelete(null)}
                   >
-                    {deleting ? (
-                      "Deleting Case…"
-                    ) : (
-                      <>
-                        <span aria-hidden="true">🗑️</span> Yes, Delete Case
-                      </>
-                    )}
+                    Cancel
                   </button>
                 </div>
               </div>

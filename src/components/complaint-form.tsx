@@ -10,6 +10,11 @@ import {
 } from "@/lib/constants";
 import { useLanguage } from "@/context/language-context";
 import { createStoredComplaint } from "@/lib/client-storage";
+import { collectImageSignals, resizeDataUrlForVision } from "@/lib/image-signals";
+import { heuristicVisionAnalysis, type VisionResult } from "@/lib/vision";
+import { detectUserLocation, geoErrorMessage } from "@/lib/geolocation";
+import { compressImageFile } from "@/lib/image-compress";
+import Spinner from "@/components/ui/spinner";
 
 type GeoState = "idle" | "detecting" | "success" | "error";
 
@@ -34,7 +39,10 @@ export default function ComplaintForm() {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [photoFilename, setPhotoFilename] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState("");
+  const [compressing, setCompressing] = useState(false);
   const [geoState, setGeoState] = useState<GeoState>("idle");
+  const [geoMessage, setGeoMessage] = useState("");
+  const [locationText, setLocationText] = useState("");
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   const handlePhotoChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -56,56 +64,38 @@ export default function ComplaintForm() {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result ?? "");
-      if (!dataUrl.startsWith("data:image/")) {
-        setPhotoError("The selected file could not be read as an image.");
-        event.target.value = "";
-        return;
-      }
-      const probe = new Image();
-      probe.onload = () => {
-        if (probe.naturalWidth === 0 || probe.naturalHeight === 0) {
-          setPhotoError("The selected image appears to be corrupt or empty.");
-          event.target.value = "";
+    // Compress to max 800px @ 0.7 before touching React state / localStorage.
+    setCompressing(true);
+    compressImageFile(file)
+      .then((compressed) => {
+        if (!compressed.dataUrl.startsWith("data:image/")) {
+          setPhotoError("The selected file could not be read as an image.");
           return;
         }
-        setPhotoPreview(dataUrl);
+        setPhotoPreview(compressed.dataUrl);
         setPhotoFilename(file.name);
         setPhotoError("");
-      };
-      probe.onerror = () => {
-        setPhotoError(
-          "The selected file is not a valid image. Please attach a genuine JPG, PNG or WEBP photo."
-        );
-        event.target.value = "";
-      };
-      probe.src = dataUrl;
-    };
-    reader.onerror = () => {
-      setPhotoError("Could not read the selected file. Please try again.");
-      event.target.value = "";
-    };
-    reader.readAsDataURL(file);
+      })
+      .catch(() => {
+        setPhotoError("Could not read the selected file. Please try again.");
+      })
+      .finally(() => setCompressing(false));
   };
 
-  const detectLocation = () => {
-    if (!navigator.geolocation) { setGeoState("error"); return; }
+  const detectLocation = async () => {
+    setGeoMessage("");
     setGeoState("detecting");
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-        setCoords({ lat, lng });
-        setGeoState("success");
-        if (locationRef.current && !locationRef.current.value.trim()) {
-          locationRef.current.value = `Detected: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-        }
-      },
-      () => setGeoState("error"),
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
-    );
+    const outcome = await detectUserLocation();
+    if (!outcome.ok) {
+      setGeoState("error");
+      setGeoMessage(geoErrorMessage(outcome.error));
+      return;
+    }
+    const { lat, lng, address } = outcome.result;
+    setCoords({ lat, lng });
+    setLocationText(address);
+    setGeoState("success");
+    setGeoMessage("Location detected successfully.");
   };
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -250,6 +240,11 @@ export default function ComplaintForm() {
             onChange={handlePhotoChange}
           />
         </label>
+        {compressing && (
+          <p className="mt-3 inline-flex items-center gap-2 text-sm text-muted">
+            <Spinner /> Compressing image…
+          </p>
+        )}
         {photoError && (
           <p className="mt-3 text-sm font-medium text-red-700">{photoError}</p>
         )}
@@ -290,23 +285,44 @@ export default function ComplaintForm() {
               name="location"
               type="text"
               ref={locationRef}
+              value={locationText}
+              onChange={(e) => setLocationText(e.target.value)}
               required
               placeholder={t.locationPlaceholder}
               className="input"
+              autoComplete="street-address"
             />
+            <p className="mt-1 text-xs text-muted">
+              You can tap Get My Location or type your area / city name yourself.
+            </p>
           </div>
           <input type="hidden" name="latitude" value={coords ? String(coords.lat) : ""} />
           <input type="hidden" name="longitude" value={coords ? String(coords.lng) : ""} />
           <div className="flex flex-wrap items-center gap-3">
-            <button type="button" onClick={detectLocation} disabled={geoState === "detecting"} className="btn-outline">
-              {geoState === "detecting" ? "Detecting…" : t.getMyLocationBtn}
+            <button
+              type="button"
+              onClick={detectLocation}
+              disabled={geoState === "detecting"}
+              className="btn-outline"
+            >
+              {geoState === "detecting" ? (
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-navy border-t-transparent"
+                    aria-hidden="true"
+                  />
+                  Fetching GPS coordinates…
+                </span>
+              ) : (
+                t.getMyLocationBtn
+              )}
             </button>
             {geoState === "success" && (
-              <span className="text-sm font-medium text-green-700">✓ {t.locationSuccess}</span>
+              <span className="text-sm font-medium text-green-700">✓ {geoMessage || t.locationSuccess}</span>
             )}
             {geoState === "error" && (
               <span className="max-w-md text-sm font-medium text-red-700">
-                {t.locationError}
+                {geoMessage || "Location permission denied. You can manually type your area/city name above."}
               </span>
             )}
             {coords && (
@@ -351,7 +367,7 @@ export default function ComplaintForm() {
 
       <div className="flex flex-col gap-3 sm:flex-row">
         <button type="submit" disabled={submitting} className="btn-saffron !py-3 !px-8 !text-base sm:flex-1">
-          {submitting ? "Submitting…" : t.submitComplaintBtn}
+          {submitting ? "Analyzing evidence…" : t.submitComplaintBtn}
         </button>
         <Link href="/" className="btn-outline !py-3 sm:flex-1 text-center">
           {t.cancelBtn}
